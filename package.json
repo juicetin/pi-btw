@@ -22,12 +22,27 @@
   ],
   "files": [
     "extensions",
+    "dashboard",
     "docs",
     "README.md",
     "LICENSE"
   ],
   "publishConfig": {
     "access": "public"
+  },
+  "exports": {
+    ".": {
+      "types": "./dashboard/client/index.tsx",
+      "default": "./dashboard/client/index.tsx"
+    },
+    "./dashboard/server": {
+      "types": "./dashboard/server/index.ts",
+      "default": "./dashboard/server/index.ts"
+    },
+    "./dashboard/bridge": {
+      "types": "./dashboard/bridge/index.ts",
+      "default": "./dashboard/bridge/index.ts"
+    }
   },
   "scripts": {
     "test": "vitest --run"
@@ -41,12 +56,51 @@
     ],
     "image": "https://raw.githubusercontent.com/dbachelder/pi-btw/main/docs/btw-overlay.png"
   },
+  "pi-dashboard-plugin": {
+    "id": "btw",
+    "displayName": "BTW Side Conversation",
+    "priority": 100,
+    "client": "./dashboard/client/index.tsx",
+    "server": "./dashboard/server/index.ts",
+    "bridge": "./dashboard/bridge/index.ts",
+    "claims": [
+      {
+        "slot": "content-header-sticky",
+        "component": "BtwPanelHost"
+      }
+    ],
+    "requires": {
+      "piExtensions": [
+        "pi-btw"
+      ],
+      "binaries": [
+        "bwrap",
+        "systemd-run",
+        "systemctl"
+      ]
+    }
+  },
+  "dependencies": {
+    "@blackbelt-technology/dashboard-plugin-runtime": "^0.5.4",
+    "@blackbelt-technology/pi-dashboard-shared": "^0.5.4"
+  },
   "peerDependencies": {
     "@earendil-works/pi-ai": ">=0.74.0 <1",
     "@earendil-works/pi-coding-agent": ">=0.74.0 <1",
-    "@earendil-works/pi-tui": ">=0.74.0 <1"
+    "@earendil-works/pi-tui": ">=0.74.0 <1",
+    "react": ">=18.0.0",
+    "react-dom": ">=18.0.0"
   },
   "devDependencies": {
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.1",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "ajv": "^8.20.0",
+    "fastify": "^5.10.0",
+    "jsdom": "^26.1.0",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
     "typescript": "^6.0.2",
     "vitest": "^4.1.0"
   }

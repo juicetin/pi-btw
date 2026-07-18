@@ -229,6 +229,9 @@ export function buildSystemdRunArgs(unit: string, options: SandboxOptions, comma
     "--property=IPAddressDeny=fd00:ec2::254/128",
     "--property=IPAddressDeny=100.100.100.200/32",
     `--property=RuntimeMaxSec=${limits.runtimeSeconds}`,
+    "--property=TimeoutStopSec=1s",
+    "--property=KillMode=control-group",
+    "--property=SendSIGKILL=yes",
     options.bubblewrapPath,
     ...buildBubblewrapArgs(command),
   ];
@@ -249,19 +252,30 @@ function assertExecutablesAvailable(options: SandboxOptions): void {
   }
 }
 
-function stopUnit(options: SandboxOptions, unit: string): Promise<void> {
+function runSystemctlStop(options: SandboxOptions, unit: string): Promise<number | null> {
   return new Promise((resolvePromise, reject) => {
-    const stop = spawn(options.systemctlPath, ["--user", "stop", unit], { stdio: "ignore" });
+    const stop = spawn(options.systemctlPath, ["--user", "stop", "--no-block", unit], { stdio: "ignore" });
     stop.once("error", reject);
-    stop.once("close", (code) => {
-      if (code === 0) resolvePromise();
-      else reject(new Error(`Failed to stop BTW sandbox unit ${unit}: systemctl exited with code ${code}`));
-    });
+    stop.once("close", resolvePromise);
   });
+}
+
+async function stopUnit(options: SandboxOptions, unit: string, child: ChildProcess): Promise<void> {
+  for (let attempt = 1; attempt <= 5; attempt += 1) {
+    const code = await runSystemctlStop(options, unit);
+    if (code === 0 || child.exitCode !== null) return;
+    if (code !== 5 || attempt === 5) {
+      throw new Error(`Failed to stop BTW sandbox unit ${unit}: systemctl exited with code ${code}`);
+    }
+    // systemd-run can receive an abort just before the transient unit is
+    // registered. Retry only that explicit "unit not found" race.
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+  }
 }
 
 type TerminationController = {
   didTimeOut: () => boolean;
+  waitForExit: (exit: Promise<number | null>) => Promise<number | null>;
   wait: () => Promise<void>;
   dispose: () => void;
 };
@@ -274,17 +288,24 @@ function createTerminationController(
 ): TerminationController {
   let timedOut = false;
   let termination: Promise<void> | undefined;
+  let rejectTermination!: (error: unknown) => void;
+  const terminationFailure = new Promise<never>((_resolve, reject) => {
+    rejectTermination = reject;
+  });
   const terminate = () => {
-    termination ??= stopUnit(options, unit);
-    child.kill("SIGTERM");
+    if (termination) return;
+    termination = stopUnit(options, unit, child);
+    void termination.catch(rejectTermination);
   };
   const timeout = setTimeout(() => {
     timedOut = true;
     terminate();
   }, options.limits.runtimeSeconds * 1000);
   signal?.addEventListener("abort", terminate, { once: true });
+  if (signal?.aborted) terminate();
   return {
     didTimeOut: () => timedOut,
+    waitForExit: (exit) => Promise.race([exit, terminationFailure]),
     wait: async () => termination,
     dispose: () => {
       clearTimeout(timeout);
@@ -317,7 +338,7 @@ export async function runReadOnlySandboxCommand(
   child.stdout?.on("data", command.onData ?? (() => {}));
   child.stderr?.on("data", command.onData ?? (() => {}));
   try {
-    const exitCode = await waitForChild(child);
+    const exitCode = await termination.waitForExit(waitForChild(child));
     await termination.wait();
     if (command.signal?.aborted) throw new Error("aborted");
     if (termination.didTimeOut()) throw new Error(`timeout:${options.limits.runtimeSeconds}`);

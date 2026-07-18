@@ -145,6 +145,8 @@ BTW is implemented as an actual pi sub-session with its own in-memory session st
 
 The `juicetin/pi-btw` dashboard branch replaces BTW's mutating coding tools with a Bubblewrap-enforced `read` and `bash` surface. The main Pi session is unchanged. Linux host requirements, security boundaries, resource limits, validation, and rollback instructions are documented in [`docs/read-only-sandbox.md`](docs/read-only-sandbox.md).
 
+The same package also contributes a session-scoped BTW status button and right-hand slide-over to the managed pi-dashboard 0.5.4+ fork. Dashboard 0.5.4 bundles client plugins at build time, so a standalone Pi package install does not alter an existing dashboard build. Fork integration, headless RPC requirements, transport boundaries, reconnect behavior, and UI validation are documented in [`docs/dashboard-plugin.md`](docs/dashboard-plugin.md).
+
 ### In-modal slash behavior
 
 Inside the BTW modal composer, slash handling is split at the BTW/session boundary:

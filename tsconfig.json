@@ -7,8 +7,9 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "noEmit": true,
+    "jsx": "react-jsx",
     "resolveJsonModule": true,
     "types": ["node"]
   },
-  "include": ["extensions/**/*.ts"]
+  "include": ["extensions/**/*.ts", "dashboard/**/*.ts", "dashboard/**/*.tsx"]
 }

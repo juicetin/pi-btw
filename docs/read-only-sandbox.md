@@ -54,7 +54,7 @@ Each command runs in a transient systemd user service with these limits:
 - processes: 128
 - CPU quota: 400 percent, equivalent to four fully used cores
 
-Timeout and abort paths stop the transient unit for bash and read operations. A limit failure is returned as a tool error. There are no automatic retries or larger-limit fallbacks.
+Timeout and abort paths stop the transient unit for bash and read operations. systemd gives the command one second to stop, then kills the complete control group. If abort arrives before systemd has registered the transient unit, cleanup retries only the explicit `unit not found` race up to five times at 25-millisecond intervals. Other stop failures are returned immediately. A limit failure is returned as a tool error. There are no command retries or larger-limit fallbacks.
 
 ## Network boundary
 
