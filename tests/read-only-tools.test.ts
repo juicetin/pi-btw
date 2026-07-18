@@ -1,10 +1,14 @@
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { buildSystemdRunArgs, DEFAULT_SANDBOX_OPTIONS } from "../extensions/read-only-sandbox";
+import {
+  buildSystemdRunArgs,
+  DEFAULT_SANDBOX_OPTIONS,
+  runReadOnlySandboxCommand,
+} from "../extensions/read-only-sandbox";
 import {
   createReadOnlyBtwToolDefinitions,
   type ReadOnlySandboxLimits,
@@ -202,6 +206,24 @@ describe("read-only BTW tools", () => {
     expect(Date.now() - startedAt).toBeLessThan(4_000);
   });
 
+  it("surfaces sandbox stop failures immediately", async () => {
+    const cwd = await createProject();
+    const fakeSystemdRun = join(cwd, "fake-systemd-run");
+    const fakeSystemctl = join(cwd, "fake-systemctl");
+    await writeFile(fakeSystemdRun, "#!/bin/sh\nsleep 1\n");
+    await writeFile(fakeSystemctl, "#!/bin/sh\nexit 2\n");
+    await chmod(fakeSystemdRun, 0o755);
+    await chmod(fakeSystemctl, 0o755);
+    const controller = new AbortController();
+    const execution = runReadOnlySandboxCommand(
+      { cwd, executable: "/bin/true", args: [], signal: controller.signal },
+      { systemdRunPath: fakeSystemdRun, systemctlPath: fakeSystemctl },
+    );
+    setTimeout(() => controller.abort(), 50);
+
+    await expect(execution).rejects.toThrow("systemctl exited with code 2");
+  });
+
   it("enforces the configured command deadline", async () => {
     const cwd = await createProject();
     const limits: Partial<ReadOnlySandboxLimits> = { runtimeSeconds: 1 };
@@ -269,6 +291,9 @@ describe("read-only BTW tools", () => {
     expect(args).toContain("--property=IPAddressDeny=fd00:ec2::254/128");
     expect(args).toContain("--property=IPAddressDeny=100.100.100.200/32");
     expect(args).toContain("--property=RuntimeMaxSec=60");
+    expect(args).toContain("--property=TimeoutStopSec=1s");
+    expect(args).toContain("--property=KillMode=control-group");
+    expect(args).toContain("--property=SendSIGKILL=yes");
   });
 
   it("fails closed when the secret scan exceeds its depth bound", async () => {

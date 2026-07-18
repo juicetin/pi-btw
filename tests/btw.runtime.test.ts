@@ -1,6 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext, RegisteredCommand } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
+import { subscribeBtwDashboardState } from "../dashboard/port";
+import {
+  BTW_DASHBOARD_ACTION_EVENT,
+  BTW_DASHBOARD_ARRAY_LIMIT,
+  BTW_DASHBOARD_HISTORY_EVENT,
+  BTW_DASHBOARD_STATE_EVENT,
+  isBtwDashboardState,
+  type BtwDashboardState,
+} from "../dashboard/protocol";
 import btwExtension from "../extensions/btw";
 
 const { promptStreamMock, createAgentSessionMock, sessionManagerInMemoryMock, subSessionRecords } = vi.hoisted(() => ({
@@ -503,6 +512,20 @@ function createHarness(
   // Pre-register the common BTW override fixture used by most tests.
   registeredModels.set("fast-provider/fast-model", { provider: "fast-provider", id: "fast-model", api: "custom-api" });
   const mainSessionInputs: string[] = [];
+  const eventBusListeners = new Map<string, Set<(data: unknown) => void>>();
+  const emittedEvents: Array<{ channel: string; data: unknown }> = [];
+  const events = {
+    on(channel: string, handler: (data: unknown) => void) {
+      const listeners = eventBusListeners.get(channel) ?? new Set();
+      listeners.add(handler);
+      eventBusListeners.set(channel, listeners);
+      return () => listeners.delete(handler);
+    },
+    emit(channel: string, data: unknown) {
+      emittedEvents.push({ channel, data });
+      for (const listener of eventBusListeners.get(channel) ?? []) listener(data);
+    },
+  };
 
   const ui = {
     theme,
@@ -546,6 +569,7 @@ function createHarness(
   };
 
   const api: ExtensionAPI = {
+    events,
     on: ((event: string, handler: Function) => {
       const list = handlers.get(event) ?? [];
       list.push(handler);
@@ -668,6 +692,8 @@ function createHarness(
     overlays,
     baseCtx,
     mainSessionInputs,
+    emittedEvents,
+    events,
     runSessionStart,
     runEvent,
     command,
@@ -732,6 +758,110 @@ describe("btw runtime behavior", () => {
     expect(subSession.bindExtensions).not.toHaveBeenCalled();
     expect(subSession.getActiveToolNames()).toEqual(["read", "bash"]);
     expect(subSession.prompt).toHaveBeenCalledWith("first question", { source: "extension" });
+  });
+
+  it("publishes headless dashboard state, rejects concurrent submits, and routes abort", async () => {
+    const harness = createHarness();
+    harness.baseCtx.hasUI = false;
+    const states: BtwDashboardState[] = [];
+    const unsubscribe = subscribeBtwDashboardState((state) => states.push(state));
+    const blocked = createBlockingSuccessStream("Dashboard answer");
+    promptStreamMock.mockImplementationOnce(() => blocked.stream());
+
+    try {
+      await harness.runSessionStart();
+      const running = harness.command("btw", "dashboard question");
+      await flushAsyncWork();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      expect(states.at(-1)).toMatchObject({ busy: true, phase: "running" });
+      expect(states.at(-1)?.transcript.some((entry) => entry.type === "tool-call")).toBe(true);
+
+      await harness.command("btw", "should be rejected");
+      await harness.command("btw:tangent", "cross-mode should also be rejected");
+      expect(subSessionRecords[0]?.promptCalls).toHaveLength(1);
+      expect(subSessionRecords[0]?.session.dispose).not.toHaveBeenCalled();
+      expect(states.at(-1)?.statusText).toContain("already running");
+
+      harness.events.emit(BTW_DASHBOARD_ACTION_EVENT, { action: "abort" });
+      await vi.waitFor(() => expect(subSessionRecords[0]?.session.abort).toHaveBeenCalled());
+      blocked.release();
+      await running;
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      expect(states.at(-1)?.exchanges).toEqual([
+        expect.objectContaining({ question: "dashboard question", answer: "Dashboard answer" }),
+      ]);
+      expect(harness.overlays).toHaveLength(0);
+      expect(harness.emittedEvents.some((event) => event.channel === BTW_DASHBOARD_STATE_EVENT)).toBe(true);
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it("rejects a concurrent submit while the first request is still preparing", async () => {
+    const harness = createHarness();
+    let releaseSession!: () => void;
+    const sessionGate = new Promise<void>((resolve) => {
+      releaseSession = resolve;
+    });
+    createAgentSessionMock.mockImplementationOnce(async (options: any) => {
+      await sessionGate;
+      return createMockAgentSession(options);
+    });
+
+    await harness.runSessionStart();
+    const first = harness.command("btw", "first question");
+    await flushAsyncWork();
+
+    await harness.command("btw", "racing question");
+    expect(createAgentSessionMock).toHaveBeenCalledOnce();
+    expect(harness.notifications.at(-1)?.message).toContain("already running");
+
+    releaseSession();
+    await first;
+    expect(subSessionRecords[0]?.promptCalls).toHaveLength(1);
+  });
+
+  it("keeps dashboard state below the host event-array truncation threshold", async () => {
+    const entries: SessionEntry[] = Array.from({ length: 25 }, (_, index) => ({
+      type: "custom",
+      customType: "btw-thread-entry",
+      data: {
+        question: `question-${index}`,
+        answer: `answer-${index}`,
+        thinking: "",
+        provider: "p",
+        model: "m",
+        api: "openai-responses",
+        thinkingLevel: "off",
+        timestamp: index + 1,
+      },
+    }));
+    const harness = createHarness(entries);
+    let latest: BtwDashboardState | undefined;
+    const unsubscribe = subscribeBtwDashboardState((state) => {
+      latest = state;
+    });
+
+    try {
+      await harness.runSessionStart();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(latest?.exchanges).toHaveLength(BTW_DASHBOARD_ARRAY_LIMIT);
+      expect(latest?.transcript.length).toBeLessThanOrEqual(BTW_DASHBOARD_ARRAY_LIMIT);
+      expect(isBtwDashboardState(latest)).toBe(true);
+
+      harness.events.emit(BTW_DASHBOARD_ACTION_EVENT, { action: "snapshot" });
+      await flushAsyncWork();
+      const historyChunks = harness.emittedEvents
+        .filter((event) => event.channel === BTW_DASHBOARD_HISTORY_EVENT)
+        .map((event) => event.data as { exchanges: unknown[] });
+      expect(historyChunks).toHaveLength(2);
+      expect(historyChunks.every((chunk) => chunk.exchanges.length <= BTW_DASHBOARD_ARRAY_LIMIT)).toBe(true);
+      expect(historyChunks.flatMap((chunk) => chunk.exchanges)).toHaveLength(25);
+    } finally {
+      unsubscribe();
+    }
   });
 
   it("accepts successful subscription auth without requiring an API key", async () => {

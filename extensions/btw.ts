@@ -11,6 +11,26 @@ import {
   type ResourceLoader,
 } from "@earendil-works/pi-coding-agent";
 import { type AssistantMessage, type Message, type ThinkingLevel as AiThinkingLevel, type UserMessage } from "@earendil-works/pi-ai";
+import {
+  dispatchBtwDashboardAction,
+  publishBtwDashboardState,
+  registerBtwDashboardController,
+  subscribeBtwDashboardState,
+} from "../dashboard/port";
+import {
+  BTW_DASHBOARD_ACTION_EVENT,
+  BTW_DASHBOARD_ARRAY_LIMIT,
+  BTW_DASHBOARD_BRIDGE_READY_EVENT,
+  BTW_DASHBOARD_HISTORY_EVENT,
+  BTW_DASHBOARD_STATE_EVENT,
+  boundBtwDashboardExchange,
+  boundBtwDashboardText,
+  boundBtwDashboardTranscriptEntry,
+  isBtwDashboardAction,
+  type BtwDashboardExchange,
+  type BtwDashboardHistoryChunk,
+  type BtwDashboardSnapshot,
+} from "../dashboard/protocol";
 import { createReadOnlyBtwToolDefinitions } from "./read-only-tools";
 import {
   Box,
@@ -1325,6 +1345,62 @@ export default function (pi: ExtensionAPI) {
   let overlayRuntime: OverlayRuntime | null = null;
   let lastUiContext: ExtensionContext | ExtensionCommandContext | null = null;
   let activeBtwSession: BtwSessionRuntime | null = null;
+  let btwRequestInFlight = false;
+  let dashboardHistoryRequest = 0;
+  let dashboardThreadId = "pending";
+
+  function getAllDashboardExchanges(): BtwDashboardExchange[] {
+    return pendingThread.map((entry) => boundBtwDashboardExchange({
+      question: entry.question,
+      answer: entry.answer,
+      thinking: entry.thinking,
+      timestamp: entry.timestamp,
+      provider: entry.provider,
+      model: entry.model,
+    }));
+  }
+
+  function getDashboardSnapshot(): BtwDashboardSnapshot {
+    const busy = btwRequestInFlight || (activeBtwSession?.session.isStreaming ?? false);
+    const statusLower = overlayStatus?.toLowerCase() ?? "";
+    const phase = busy
+      ? "running"
+      : /failed|error|no active model|no api key|no credentials|authentication|unauthorized|forbidden|unavailable|unknown model|requires/u.test(statusLower)
+        ? "error"
+        : "idle";
+    return {
+      threadId: dashboardThreadId,
+      mode: pendingMode,
+      phase,
+      busy,
+      statusText: overlayStatus === null ? null : boundBtwDashboardText(overlayStatus),
+      exchanges: getAllDashboardExchanges().slice(-BTW_DASHBOARD_ARRAY_LIMIT),
+      transcript: transcriptState.entries
+        .slice(-BTW_DASHBOARD_ARRAY_LIMIT)
+        .map(boundBtwDashboardTranscriptEntry),
+    };
+  }
+
+  function emitDashboardHistory(): void {
+    const exchanges = getAllDashboardExchanges();
+    const totalChunks = Math.max(1, Math.ceil(exchanges.length / BTW_DASHBOARD_ARRAY_LIMIT));
+    const requestId = `${Date.now()}-${++dashboardHistoryRequest}`;
+    for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex += 1) {
+      const chunk: BtwDashboardHistoryChunk = {
+        version: 1,
+        requestId,
+        threadId: dashboardThreadId,
+        chunkIndex,
+        totalChunks,
+        updatedAt: Date.now(),
+        exchanges: exchanges.slice(
+          chunkIndex * BTW_DASHBOARD_ARRAY_LIMIT,
+          (chunkIndex + 1) * BTW_DASHBOARD_ARRAY_LIMIT,
+        ),
+      };
+      pi.events.emit(BTW_DASHBOARD_HISTORY_EVENT, chunk);
+    }
+  }
 
   function syncUi(ctx?: ExtensionContext | ExtensionCommandContext): void {
     const activeCtx = ctx ?? lastUiContext;
@@ -1332,6 +1408,7 @@ export default function (pi: ExtensionAPI) {
       activeCtx.ui.setWidget("btw", undefined);
       overlayRuntime?.refresh?.();
     }
+    publishBtwDashboardState();
   }
 
   function setOverlayStatus(status: string | null, ctx?: ExtensionContext | ExtensionCommandContext): void {
@@ -1398,7 +1475,7 @@ export default function (pi: ExtensionAPI) {
     event: AgentSessionEvent,
     ctx?: ExtensionContext | ExtensionCommandContext,
   ): void {
-    if (activeBtwSession?.session !== sessionRuntime.session || !overlayRuntime) {
+    if (activeBtwSession?.session !== sessionRuntime.session) {
       return;
     }
 
@@ -1429,7 +1506,7 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  function subscribeOverlayToActiveBtwSession(ctx?: ExtensionContext | ExtensionCommandContext): void {
+  function subscribeToActiveBtwSession(ctx?: ExtensionContext | ExtensionCommandContext): void {
     const sessionRuntime = activeBtwSession;
     if (!sessionRuntime || sessionRuntime.subscriptions.size > 0) {
       return;
@@ -1630,6 +1707,8 @@ export default function (pi: ExtensionAPI) {
 
     await disposeBtwSession();
     activeBtwSession = await createBtwSubSession(ctx, mode);
+    subscribeToActiveBtwSession(ctx);
+    syncUi(ctx);
     return activeBtwSession;
   }
 
@@ -1640,7 +1719,7 @@ export default function (pi: ExtensionAPI) {
     lastUiContext = ctx;
 
     if (overlayRuntime?.handle) {
-      subscribeOverlayToActiveBtwSession(ctx);
+      subscribeToActiveBtwSession(ctx);
       focusOverlay();
       return;
     }
@@ -1651,9 +1730,6 @@ export default function (pi: ExtensionAPI) {
         return;
       }
       runtime.closed = true;
-      if (activeBtwSession) {
-        clearBtwSessionSubscriptions(activeBtwSession);
-      }
       runtime.handle?.hide();
       if (overlayRuntime === runtime) {
         overlayRuntime = null;
@@ -1705,7 +1781,7 @@ export default function (pi: ExtensionAPI) {
             closeRuntime();
           };
 
-          subscribeOverlayToActiveBtwSession(ctx);
+          subscribeToActiveBtwSession(ctx);
 
           if (runtime.closed) {
             done();
@@ -1740,8 +1816,23 @@ export default function (pi: ExtensionAPI) {
       });
   }
 
+  function rejectBusyBtwRequest(ctx: ExtensionCommandContext): boolean {
+    if (!btwRequestInFlight && !activeBtwSession?.session.isStreaming) return false;
+    const message = "A BTW request is already running. Abort it or wait for it to finish.";
+    setOverlayStatus(message, ctx);
+    notify(ctx, message, "warning");
+    publishBtwDashboardState({ openPanel: true, immediate: true });
+    return true;
+  }
+
   async function dispatchBtwCommand(name: string, args: string, ctx: ExtensionCommandContext): Promise<boolean> {
     const trimmedArgs = args.trim();
+    if (name === "btw" || name === "btw:tangent" || name === "btw:new") {
+      publishBtwDashboardState({ openPanel: true, immediate: true });
+    }
+    const contextualQuestion = name === "btw" ? parseBtwArgs(trimmedArgs).question : "";
+    const mutatesRunningThread = name === "btw:tangent" || name === "btw:new" || !!contextualQuestion;
+    if (mutatesRunningThread && rejectBusyBtwRequest(ctx)) return true;
 
     if (name === "btw") {
       const { question, save } = parseBtwArgs(trimmedArgs);
@@ -1751,21 +1842,14 @@ export default function (pi: ExtensionAPI) {
         return true;
       }
 
-      if (pendingMode !== "contextual") {
-        await resetThread(ctx, true, "contextual");
-      }
-
       await runBtw(ctx, question, save, "contextual");
       return true;
     }
 
     if (name === "btw:tangent") {
       const { question, save } = parseBtwArgs(trimmedArgs);
-      if (pendingMode !== "tangent") {
-        await resetThread(ctx, true, "tangent");
-      }
-
       if (!question) {
+        if (pendingMode !== "tangent") await resetThread(ctx, true, "tangent");
         await ensureBtwSession(ctx, "tangent");
         await ensureOverlay(ctx);
         return true;
@@ -1776,11 +1860,11 @@ export default function (pi: ExtensionAPI) {
     }
 
     if (name === "btw:new") {
-      await resetThread(ctx, true, "contextual");
       const { question, save } = parseBtwArgs(trimmedArgs);
       if (question) {
-        await runBtw(ctx, question, save, "contextual");
+        await runBtw(ctx, question, save, "contextual", true);
       } else {
+        await resetThread(ctx, true, "contextual");
         await ensureBtwSession(ctx, "contextual");
         setOverlayStatus("Started a fresh BTW thread.", ctx);
         await ensureOverlay(ctx);
@@ -1950,10 +2034,12 @@ export default function (pi: ExtensionAPI) {
     pendingThread = [];
     pendingMode = mode;
     transcriptState = createEmptyTranscriptState();
+    const resetTimestamp = Date.now();
+    dashboardThreadId = `reset-${resetTimestamp}`;
     setOverlayDraft("");
     setOverlayStatus(null, ctx);
     if (persist) {
-      const details: BtwResetDetails = { timestamp: Date.now(), mode };
+      const details: BtwResetDetails = { timestamp: resetTimestamp, mode };
       pi.appendEntry(BTW_RESET_TYPE, details);
     }
     syncUi(ctx);
@@ -1972,6 +2058,7 @@ export default function (pi: ExtensionAPI) {
 
     const branch = ctx.sessionManager.getBranch();
     let lastResetIndex = -1;
+    let lastResetTimestamp: number | undefined;
 
     for (let i = 0; i < branch.length; i++) {
       if (isCustomEntry(branch[i], BTW_MODEL_OVERRIDE_TYPE)) {
@@ -2003,8 +2090,13 @@ export default function (pi: ExtensionAPI) {
         lastResetIndex = i;
         const details = (branch[i] as unknown as { data?: BtwResetDetails }).data;
         pendingMode = details?.mode ?? "contextual";
+        lastResetTimestamp = details?.timestamp;
       }
     }
+
+    dashboardThreadId = lastResetTimestamp
+      ? `reset-${lastResetTimestamp}`
+      : `branch-${ctx.sessionManager.getLeafId() ?? "root"}`;
 
     for (const entry of branch.slice(lastResetIndex + 1)) {
       if (!isCustomEntry(entry, BTW_ENTRY_TYPE)) {
@@ -2033,8 +2125,28 @@ export default function (pi: ExtensionAPI) {
     question: string,
     saveRequested: boolean,
     mode: BtwThreadMode,
+    resetFirst = false,
+  ): Promise<void> {
+    if (rejectBusyBtwRequest(ctx)) return;
+    btwRequestInFlight = true;
+    publishBtwDashboardState({ immediate: true });
+    try {
+      await runClaimedBtw(ctx, question, saveRequested, mode, resetFirst);
+    } finally {
+      btwRequestInFlight = false;
+      syncUi(ctx);
+    }
+  }
+
+  async function runClaimedBtw(
+    ctx: ExtensionCommandContext,
+    question: string,
+    saveRequested: boolean,
+    mode: BtwThreadMode,
+    resetFirst: boolean,
   ): Promise<void> {
     lastUiContext = ctx;
+    if (resetFirst || pendingMode !== mode) await resetThread(ctx, true, mode);
     const settings = await resolveBtwSettings(ctx);
     const model = settings.model;
     if (!model) {
@@ -2121,8 +2233,6 @@ export default function (pi: ExtensionAPI) {
       setOverlayStatus("Request failed. Thread preserved for retry or follow-up.", ctx);
       notify(ctx, errorMessage, "error");
       await disposeBtwSession();
-    } finally {
-      syncUi(ctx);
     }
   }
 
@@ -2198,6 +2308,46 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  async function abortBtwDashboardRequest(): Promise<void> {
+    const session = activeBtwSession?.session;
+    if (!session?.isStreaming) {
+      setOverlayStatus(btwRequestInFlight
+        ? "BTW request is preparing and cannot be aborted yet."
+        : "No BTW request is running.");
+      publishBtwDashboardState({ immediate: true });
+      return;
+    }
+    try {
+      await session.abort();
+      setOverlayStatus("Request aborted.");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setOverlayStatus(`Abort failed: ${message}`);
+      throw error;
+    } finally {
+      publishBtwDashboardState({ immediate: true });
+    }
+  }
+
+  const unregisterDashboardController = registerBtwDashboardController({
+    snapshot: getDashboardSnapshot,
+    abort: abortBtwDashboardRequest,
+  });
+  const unsubscribeDashboardState = subscribeBtwDashboardState((state) => {
+    pi.events.emit(BTW_DASHBOARD_STATE_EVENT, state);
+  });
+  const maybeUnsubscribeDashboardAction = pi.events.on(BTW_DASHBOARD_ACTION_EVENT, (data) => {
+    if (!isBtwDashboardAction(data)) return;
+    if (data.action === "snapshot") emitDashboardHistory();
+    void dispatchBtwDashboardAction(data).catch((error) => {
+      console.error("[btw-dashboard] action failed", error);
+    });
+  });
+  const maybeUnsubscribeBridgeReady = pi.events.on(BTW_DASHBOARD_BRIDGE_READY_EVENT, () => {
+    emitDashboardHistory();
+    void dispatchBtwDashboardAction({ action: "snapshot" });
+  });
+
   pi.registerMessageRenderer(BTW_MESSAGE_TYPE, (message, { expanded }, theme) => {
     const details = message.details as BtwDetails | undefined;
     const content = typeof message.content === "string" ? message.content : "[non-text btw message]";
@@ -2241,6 +2391,10 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async () => {
+    unsubscribeDashboardState();
+    if (typeof maybeUnsubscribeDashboardAction === "function") maybeUnsubscribeDashboardAction();
+    if (typeof maybeUnsubscribeBridgeReady === "function") maybeUnsubscribeBridgeReady();
+    unregisterDashboardController();
     await disposeBtwSession();
     dismissOverlay();
   });
