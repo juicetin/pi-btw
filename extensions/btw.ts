@@ -11,6 +11,7 @@ import {
   type ResourceLoader,
 } from "@earendil-works/pi-coding-agent";
 import { type AssistantMessage, type Message, type ThinkingLevel as AiThinkingLevel, type UserMessage } from "@earendil-works/pi-ai";
+import { createReadOnlyBtwToolDefinitions } from "./read-only-tools";
 import {
   Box,
   Container,
@@ -44,6 +45,7 @@ const BTW_SYSTEM_PROMPT = [
   "If no main session messages are provided, treat this as a fully contextless tangent thread and rely only on the user's words plus your general instructions.",
   "Focus on answering the user's side questions, helping them think through ideas, or planning next steps.",
   "Do not act as if you need to continue unfinished work from the main session unless the user explicitly asks you to prepare something for injection back to it.",
+  "Your file tools run in a read-only sandbox. Use them only for inspection. Do not attempt mutating network requests; outbound network access is outside the filesystem sandbox guarantee.",
 ].join(" ");
 
 const BTW_SUMMARIZE_SYSTEM_PROMPT =
@@ -1602,8 +1604,9 @@ export default function (pi: ExtensionAPI) {
       model: settings.model,
       modelRegistry: ctx.modelRegistry as AgentSession["modelRegistry"],
       thinkingLevel: settings.thinkingLevel,
-      // Match pi's default coding-agent toolset (read/bash/edit/write).
-      tools: ["read", "bash", "edit", "write"],
+      cwd: ctx.cwd,
+      noTools: "builtin",
+      customTools: createReadOnlyBtwToolDefinitions(ctx.cwd),
       resourceLoader: createBtwResourceLoader(ctx),
     });
 

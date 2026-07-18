@@ -141,6 +141,10 @@ BTW is implemented as an actual pi sub-session with its own in-memory session st
 - the overlay transcript/status line is driven from sub-session events, so tool activity, streaming deltas, failures, and recovery are all visible without scraping rendered output
 - handoff commands (`/btw:inject` and `/btw:summarize`) read from the BTW sub-session thread rather than maintaining a separate manual transcript model
 
+### Read-only fork policy
+
+The `juicetin/pi-btw` dashboard branch replaces BTW's mutating coding tools with a Bubblewrap-enforced `read` and `bash` surface. The main Pi session is unchanged. Linux host requirements, security boundaries, resource limits, validation, and rollback instructions are documented in [`docs/read-only-sandbox.md`](docs/read-only-sandbox.md).
+
 ### In-modal slash behavior
 
 Inside the BTW modal composer, slash handling is split at the BTW/session boundary:
