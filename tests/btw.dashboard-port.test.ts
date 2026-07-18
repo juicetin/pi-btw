@@ -8,6 +8,8 @@ import {
   BTW_DASHBOARD_STATE_EVENT,
   BTW_DASHBOARD_STRING_LIMIT,
   boundBtwDashboardExchange,
+  extractBtwDashboardRequest,
+  formatBtwDashboardCommand,
   isBtwDashboardState,
   type BtwDashboardSnapshot,
 } from "../dashboard/protocol";
@@ -18,6 +20,9 @@ function snapshot(overrides: Partial<BtwDashboardSnapshot> = {}): BtwDashboardSn
     mode: "contextual",
     phase: "idle",
     busy: false,
+    abortable: false,
+    modelOverride: null,
+    thinkingOverride: null,
     statusText: null,
     exchanges: [],
     transcript: [],
@@ -33,6 +38,20 @@ describe("BTW dashboard protocol", () => {
     expect(BTW_DASHBOARD_STATE_EVENT).toBe("btw:dashboard-state");
     expect(isBtwDashboardState({ version: 1, revision: 1, updatedAt: Date.now(), ...snapshot() })).toBe(true);
     expect(isBtwDashboardState({ version: 1, revision: "bad" })).toBe(false);
+  });
+
+  it("round-trips bounded dashboard request ids without exposing them as command arguments", () => {
+    const command = formatBtwDashboardCommand("btw:model", "provider model api", "request_123");
+
+    expect(command).toBe("/btw:model provider model api --btw-dashboard-request=request_123");
+    expect(extractBtwDashboardRequest("provider model api --btw-dashboard-request=request_123")).toEqual({
+      args: "provider model api",
+      requestId: "request_123",
+    });
+    expect(extractBtwDashboardRequest("question --btw-dashboard-request=bad/id")).toEqual({
+      args: "question --btw-dashboard-request=bad/id",
+      requestId: null,
+    });
   });
 
   it("bounds dashboard strings and deeply rejects malformed payloads", () => {

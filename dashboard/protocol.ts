@@ -4,6 +4,9 @@ export const BTW_DASHBOARD_HISTORY_EVENT = "btw:dashboard-history";
 export const BTW_DASHBOARD_STATE_EVENT = "btw:dashboard-state";
 export const BTW_DASHBOARD_ARRAY_LIMIT = 18;
 export const BTW_DASHBOARD_STRING_LIMIT = 16_384;
+export const BTW_DASHBOARD_REQUEST_FLAG = "--btw-dashboard-request=";
+
+const BTW_DASHBOARD_REQUEST_ID_PATTERN = /^[A-Za-z0-9_-]{8,128}$/u;
 
 export type BtwDashboardMode = "contextual" | "tangent";
 export type BtwDashboardPhase = "idle" | "running" | "error";
@@ -40,6 +43,9 @@ export type BtwDashboardSnapshot = {
   mode: BtwDashboardMode;
   phase: BtwDashboardPhase;
   busy: boolean;
+  abortable: boolean;
+  modelOverride: string | null;
+  thinkingOverride: string | null;
   statusText: string | null;
   exchanges: BtwDashboardExchange[];
   transcript: BtwDashboardTranscriptEntry[];
@@ -53,6 +59,23 @@ export type BtwDashboardState = BtwDashboardSnapshot & {
 };
 
 export type BtwDashboardAction = { action: "snapshot" | "abort" };
+
+export function formatBtwDashboardCommand(command: string, args: string, requestId: string): string {
+  if (!BTW_DASHBOARD_REQUEST_ID_PATTERN.test(requestId)) {
+    throw new Error("BTW dashboard request id must contain 8-128 letters, numbers, underscores, or hyphens.");
+  }
+  const prefix = `/${command}${args.trim() ? ` ${args.trim()}` : ""}`;
+  return `${prefix} ${BTW_DASHBOARD_REQUEST_FLAG}${requestId}`;
+}
+
+export function extractBtwDashboardRequest(args: string): { args: string; requestId: string | null } {
+  const match = args.match(/(?:^|\s)--btw-dashboard-request=([A-Za-z0-9_-]{8,128})\s*$/u);
+  if (!match) return { args: args.trim(), requestId: null };
+  return {
+    args: args.slice(0, match.index).trim(),
+    requestId: match[1],
+  };
+}
 
 export type BtwDashboardHistoryChunk = {
   version: 1;
@@ -200,6 +223,9 @@ export function isBtwDashboardState(value: unknown): value is BtwDashboardState 
     (state.mode === "contextual" || state.mode === "tangent") &&
     (state.phase === "idle" || state.phase === "running" || state.phase === "error") &&
     typeof state.busy === "boolean" &&
+    typeof state.abortable === "boolean" &&
+    (state.modelOverride === null || isBoundedString(state.modelOverride)) &&
+    (state.thinkingOverride === null || isBoundedString(state.thinkingOverride)) &&
     (state.statusText === null || isBoundedString(state.statusText)) &&
     Array.isArray(state.exchanges) &&
     state.exchanges.length <= BTW_DASHBOARD_ARRAY_LIMIT &&

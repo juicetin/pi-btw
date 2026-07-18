@@ -48,6 +48,9 @@ function state(overrides: Partial<BtwDashboardState> = {}): BtwDashboardState {
     mode: "contextual",
     phase: "idle",
     busy: false,
+    abortable: false,
+    modelOverride: null,
+    thinkingOverride: null,
     statusText: null,
     exchanges: [],
     transcript: [],
@@ -125,6 +128,7 @@ describe("BTW dashboard client", () => {
       data: state({
         phase: "running",
         busy: true,
+        abortable: true,
         statusText: "running tool: read",
         transcript: [
           { id: 1, turnId: 1, type: "turn-boundary", phase: "start" },
@@ -178,19 +182,101 @@ describe("BTW dashboard client", () => {
     expect(buildBtwDashboardPrompt("single line")).toBe("/btw single line");
   });
 
-  it("submits contextual questions through the dashboard slash-command path", async () => {
+  it("submits contextual questions with save parity and a client request id", async () => {
     mocks.events = [{ eventType: BTW_DASHBOARD_STATE_EVENT, data: state({ openRequestedAt: undefined }) }];
     render(<BtwPanelHost session={session} />);
 
     fireEvent.click(screen.getByTestId("btw-header-button"));
     fireEvent.change(screen.getByRole("textbox", { name: "Ask BTW" }), { target: { value: "Why is this failing?" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: "Save exchange" }));
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
     expect(mocks.send).toHaveBeenCalledWith({
       type: "send_prompt",
       sessionId: "session-1",
-      text: "/btw Why is this failing?",
+      text: expect.stringMatching(/^\/btw --save Why is this failing\? --btw-dashboard-request=[A-Za-z0-9_-]{8,128}$/),
     });
+  });
+
+  it("dispatches native lifecycle, model, and thinking controls with request ids", () => {
+    mocks.events = [{ eventType: BTW_DASHBOARD_STATE_EVENT, data: state({
+      openRequestedAt: undefined,
+      exchanges: [{ question: "q", answer: "a", thinking: "", timestamp: 1, provider: "p", model: "m" }],
+    }) }];
+    render(<BtwPanelHost session={session} />);
+    fireEvent.click(screen.getByTestId("btw-header-button"));
+
+    for (const name of ["New thread", "Use tangent mode", "Inject thread", "Summarize and inject"]) {
+      fireEvent.click(screen.getByRole("button", { name }));
+    }
+    fireEvent.change(screen.getByRole("textbox", { name: "BTW model override" }), {
+      target: { value: "provider model api" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Apply model override" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "BTW thinking override" }), {
+      target: { value: "high" },
+    });
+
+    const prompts = mocks.send.mock.calls
+      .map(([message]) => message)
+      .filter((message) => message.type === "send_prompt")
+      .map((message) => message.text);
+    expect(prompts).toEqual([
+      expect.stringMatching(/^\/btw:new --btw-dashboard-request=/),
+      expect.stringMatching(/^\/btw:tangent --btw-dashboard-request=/),
+      expect.stringMatching(/^\/btw:inject --btw-dashboard-request=/),
+      expect.stringMatching(/^\/btw:summarize --btw-dashboard-request=/),
+      expect.stringMatching(/^\/btw:model provider model api --btw-dashboard-request=/),
+      expect.stringMatching(/^\/btw:thinking high --btw-dashboard-request=/),
+    ]);
+  });
+
+  it("keeps tangent mode for composer follow-ups", () => {
+    mocks.events = [{ eventType: BTW_DASHBOARD_STATE_EVENT, data: state({
+      mode: "tangent",
+      openRequestedAt: undefined,
+    }) }];
+    render(<BtwPanelHost session={session} />);
+    fireEvent.click(screen.getByTestId("btw-header-button"));
+    fireEvent.change(screen.getByRole("textbox", { name: "Ask BTW" }), { target: { value: "follow up" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    expect(mocks.send).toHaveBeenCalledWith(expect.objectContaining({
+      type: "send_prompt",
+      text: expect.stringMatching(/^\/btw:tangent follow up --btw-dashboard-request=/),
+    }));
+  });
+
+  it("shows persisted model and thinking overrides when reopened", () => {
+    mocks.events = [{ eventType: BTW_DASHBOARD_STATE_EVENT, data: state({
+      openRequestedAt: undefined,
+      modelOverride: "provider model api",
+      thinkingOverride: "high",
+    }) }];
+    render(<BtwPanelHost session={session} />);
+    fireEvent.click(screen.getByTestId("btw-header-button"));
+
+    expect(screen.getByRole("textbox", { name: "BTW model override" })).toHaveValue("provider model api");
+    expect(screen.getByRole("combobox", { name: "BTW thinking override" })).toHaveValue("high");
+  });
+
+  it("requires explicit confirmation before clearing the BTW thread", () => {
+    mocks.events = [{ eventType: BTW_DASHBOARD_STATE_EVENT, data: state({
+      openRequestedAt: undefined,
+      exchanges: [{ question: "q", answer: "a", thinking: "", timestamp: 1, provider: "p", model: "m" }],
+    }) }];
+    render(<BtwPanelHost session={session} />);
+    fireEvent.click(screen.getByTestId("btw-header-button"));
+
+    fireEvent.click(screen.getByRole("button", { name: "Clear thread" }));
+    expect(mocks.send).not.toHaveBeenCalledWith(expect.objectContaining({ type: "send_prompt" }));
+    expect(screen.getByRole("button", { name: "Confirm clear" })).toHaveFocus();
+    fireEvent.click(screen.getByRole("button", { name: "Confirm clear" }));
+
+    expect(mocks.send).toHaveBeenCalledWith(expect.objectContaining({
+      type: "send_prompt",
+      text: expect.stringMatching(/^\/btw:clear --btw-dashboard-request=/),
+    }));
   });
 
   it("refetches persisted state after reconnect", async () => {
@@ -231,6 +317,9 @@ describe("BTW dashboard client", () => {
 
     expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Abort" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "New thread" })).toBeDisabled();
+    expect(screen.getByRole("textbox", { name: "BTW model override" })).toBeDisabled();
+    expect(screen.getByRole("combobox", { name: "BTW thinking override" })).toBeDisabled();
     expect(input).toHaveValue("keep this draft");
     expect(screen.getByText("Dashboard connection unavailable")).toBeInTheDocument();
     expect(mocks.send).not.toHaveBeenCalledWith(expect.objectContaining({ type: "send_prompt" }));
