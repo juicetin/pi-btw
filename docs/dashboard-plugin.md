@@ -68,7 +68,7 @@ Use one checkout for the Pi extension, dashboard bridge, server plugin, and clie
 plugin="$HOME/.pi/dashboard/plugins/pi-btw"
 git clone git@github.com:juicetin/pi-btw.git "$plugin"
 git -C "$plugin" fetch origin dashboard --tags
-git -C "$plugin" switch --detach dashboard-0.4.1-r3
+git -C "$plugin" switch --detach dashboard-0.4.1-r4
 npm --prefix "$plugin" ci
 ```
 
@@ -90,7 +90,11 @@ npm --prefix "$dashboard" run generate:plugin-registry
 npm --prefix "$dashboard" run build
 ```
 
-Keep both links while the dashboard runs. The `packages` link lets the server plugin loader discover BTW after a restart. The `node_modules` link resolves the generated client import. Configure `spawnStrategy: "headless"` and `useRpcKeeper: true`, then restart the dashboard and start a new session.
+Keep both links while the dashboard runs. The `packages` link lets the server plugin loader discover BTW after a restart. The `node_modules` link resolves the generated client import.
+
+The dashboard Vite config must set `resolve.preserveSymlinks: true` and deduplicate `react`, `react-dom`, and `@blackbelt-technology/dashboard-plugin-runtime`. Without both settings, the external plugin can bundle a second runtime instance and fail with `Slot consumer must be rendered inside <PluginContextProvider>`. The `juicetin/pi-agent-dashboard` fork includes this fix on `main`.
+
+Configure `spawnStrategy: "headless"` and `useRpcKeeper: true`, then restart the dashboard and start a new session.
 
 ## Update and rollback
 
@@ -99,7 +103,7 @@ Fetch tags, detach the managed checkout at the selected tag, run its tests, then
 ```bash
 plugin="$HOME/.pi/dashboard/plugins/pi-btw"
 git -C "$plugin" fetch origin dashboard --tags
-git -C "$plugin" switch --detach dashboard-0.4.1-r3
+git -C "$plugin" switch --detach dashboard-0.4.1-r4
 npm --prefix "$plugin" ci
 npm --prefix "$plugin" test
 npm --prefix "$plugin" exec tsc -- --noEmit
