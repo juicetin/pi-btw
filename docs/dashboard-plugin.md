@@ -60,10 +60,89 @@ Persisted exchanges show user question, assistant answer, and model identity. Sn
 
 The panel blocks concurrent submit, exposes explicit Abort, reports snapshot and transport failures, and shows idle, running, or error status in the button and composer footer.
 
+## Managed installation
+
+Use one checkout for the Pi extension, dashboard bridge, server plugin, and client plugin:
+
+```bash
+plugin="$HOME/.pi/dashboard/plugins/pi-btw"
+git clone git@github.com:juicetin/pi-btw.git "$plugin"
+git -C "$plugin" fetch origin dashboard --tags
+git -C "$plugin" switch --detach dashboard-0.4.1-r2
+npm --prefix "$plugin" ci
+```
+
+Add these two entries to `~/.pi/agent/settings.json#packages`:
+
+```json
+"../dashboard/plugins/pi-btw",
+"../dashboard/plugins/pi-btw/dashboard/bridge/index.ts"
+```
+
+Dashboard client plugins are compiled into the web bundle. Point the dashboard checkout at the same managed checkout before building:
+
+```bash
+dashboard=/path/to/pi-agent-dashboard
+ln -s "$HOME/.pi/dashboard/plugins/pi-btw" "$dashboard/packages/pi-btw-plugin"
+ln -s "$HOME/.pi/dashboard/plugins/pi-btw" "$dashboard/node_modules/pi-btw"
+npm --prefix "$dashboard" run generate:plugin-registry
+npm --prefix "$dashboard" run build
+```
+
+Keep both links while the dashboard runs. The `packages` link lets the server plugin loader discover BTW after a restart. The `node_modules` link resolves the generated client import. Configure `spawnStrategy: "headless"` and `useRpcKeeper: true`, then restart the dashboard and start a new session.
+
+## Update and rollback
+
+Fetch tags, detach the managed checkout at the selected tag, run its tests, then rebuild and restart the dashboard:
+
+```bash
+plugin="$HOME/.pi/dashboard/plugins/pi-btw"
+git -C "$plugin" fetch origin dashboard --tags
+git -C "$plugin" switch --detach dashboard-0.4.1-r2
+npm --prefix "$plugin" ci
+npm --prefix "$plugin" test
+npm --prefix "$plugin" exec tsc -- --noEmit
+npm --prefix /path/to/pi-agent-dashboard run generate:plugin-registry
+npm --prefix /path/to/pi-agent-dashboard run build
+```
+
+Rollback uses the same commands with the previous `dashboard-*` tag. Restarting Pi with an upstream `pi-btw` package would restore mutating BTW tools, so do not use the upstream package as a read-only rollback.
+
+## Monitoring
+
+After each restart, inspect the dashboard health response and logs. The health response must list `btw` with `enabled: true` and `loaded: true`; the log must contain both plugin discovery and `BTW dashboard snapshot route registered`.
+
+```bash
+curl --fail --silent http://127.0.0.1:8147/api/health
+rg 'plugin-loader.*btw|plugin:btw' "$HOME/.pi/dashboard/server.log"
+```
+
+Open a headless dashboard session, run one BTW request, then verify its snapshot route returns HTTP 200. A missing header button means the client bundle was not rebuilt. A missing snapshot route means the `packages/pi-btw-plugin` link was absent when the server started.
+
+## Upstream rebase
+
+`main` mirrors `dbachelder/pi-btw`; dashboard-only commits stay linear on `dashboard`:
+
+```bash
+git fetch upstream main
+git switch main
+git reset --hard upstream/main
+git push --force-with-lease origin main
+
+git switch dashboard
+git rebase main
+npm ci
+npm test
+npx tsc --noEmit
+git push --force-with-lease origin dashboard
+```
+
+Create and push a new annotated `dashboard-<upstream-version>-r<N>` tag only after the rebased branch passes the browser E2E. Never move an existing fork tag.
+
 ## Validation
 
 ```bash
-npm install
+npm ci
 npm test
 npx tsc --noEmit
 npm pack --dry-run
