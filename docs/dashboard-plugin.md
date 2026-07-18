@@ -68,16 +68,17 @@ Use one checkout for the Pi extension, dashboard bridge, server plugin, and clie
 plugin="$HOME/.pi/dashboard/plugins/pi-btw"
 git clone git@github.com:juicetin/pi-btw.git "$plugin"
 git -C "$plugin" fetch origin dashboard --tags
-git -C "$plugin" switch --detach dashboard-0.4.1-r2
+git -C "$plugin" switch --detach dashboard-0.4.1-r3
 npm --prefix "$plugin" ci
 ```
 
-Add these two entries to `~/.pi/agent/settings.json#packages`:
+Add the managed package to `~/.pi/agent/settings.json#packages`:
 
 ```json
-"../dashboard/plugins/pi-btw",
-"../dashboard/plugins/pi-btw/dashboard/bridge/index.ts"
+"../dashboard/plugins/pi-btw"
 ```
+
+Do not add the bridge path separately. The dashboard plugin loader registers the bridge through `packages/pi-btw-plugin`; adding the managed path as a second bridge path produces a bridge conflict.
 
 Dashboard client plugins are compiled into the web bundle. Point the dashboard checkout at the same managed checkout before building:
 
@@ -98,7 +99,7 @@ Fetch tags, detach the managed checkout at the selected tag, run its tests, then
 ```bash
 plugin="$HOME/.pi/dashboard/plugins/pi-btw"
 git -C "$plugin" fetch origin dashboard --tags
-git -C "$plugin" switch --detach dashboard-0.4.1-r2
+git -C "$plugin" switch --detach dashboard-0.4.1-r3
 npm --prefix "$plugin" ci
 npm --prefix "$plugin" test
 npm --prefix "$plugin" exec tsc -- --noEmit
