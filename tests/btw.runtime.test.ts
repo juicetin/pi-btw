@@ -760,6 +760,49 @@ describe("btw runtime behavior", () => {
     expect(subSession.prompt).toHaveBeenCalledWith("first question", { source: "extension" });
   });
 
+  it("suppresses duplicate dashboard commands across reconnect and restart", async () => {
+    const requestId = "request_123";
+    const harness = createHarness();
+    await harness.runSessionStart();
+
+    await harness.command("btw:new", `--btw-dashboard-request=${requestId}`);
+    await harness.command("btw:new", `--btw-dashboard-request=${requestId}`);
+
+    expect(harness.entries.filter((entry) => entry.customType === "btw-dashboard-request")).toHaveLength(1);
+    expect(harness.entries.filter((entry) => entry.customType === "btw-thread-reset")).toHaveLength(1);
+
+    const restored = createHarness(harness.entries);
+    await restored.runSessionStart();
+    await restored.command("btw:new", `--btw-dashboard-request=${requestId}`);
+
+    expect(restored.entries.filter((entry) => entry.customType === "btw-thread-reset")).toHaveLength(1);
+  });
+
+  it("marks summarize as non-abortable busy and rejects concurrent handoffs", async () => {
+    const harness = createHarness();
+    const states: BtwDashboardState[] = [];
+    const unsubscribe = subscribeBtwDashboardState((state) => states.push(state));
+    const blockedSummary = createBlockingSuccessStream("Short summary");
+    promptStreamMock
+      .mockImplementationOnce(() => streamAnswer("First answer"))
+      .mockImplementationOnce(() => blockedSummary.stream());
+
+    await harness.runSessionStart();
+    await harness.command("btw", "first question");
+    const summarize = harness.command("btw:summarize", "");
+    await vi.waitFor(() => expect(subSessionRecords).toHaveLength(2));
+
+    expect(states.at(-1)).toMatchObject({ busy: true, abortable: false });
+    await harness.command("btw:inject", "");
+    expect(harness.notifications.at(-1)?.message).toContain("already running");
+    expect(harness.sentUserMessages).toHaveLength(0);
+
+    blockedSummary.release();
+    await summarize;
+    expect(harness.sentUserMessages).toHaveLength(1);
+    unsubscribe();
+  });
+
   it("publishes headless dashboard state, rejects concurrent submits, and routes abort", async () => {
     const harness = createHarness();
     harness.baseCtx.hasUI = false;
@@ -1138,7 +1181,7 @@ describe("btw runtime behavior", () => {
     await harness.command("btw", "broken question");
 
     const overlay = harness.latestOverlayComponent();
-    expect(overlay.statusText.text).toContain("Request failed. Thread preserved for retry or follow-up.");
+    expect(overlay.statusText.text).toContain("Request failed: Sub-session prompt exploded. Thread preserved for retry or follow-up.");
     expect(transcriptText(overlay)).toContain("❌ Sub-session prompt exploded");
     expect(harness.notifications.at(-1)).toEqual({
       message: "Sub-session prompt exploded",
@@ -1506,7 +1549,7 @@ describe("btw runtime behavior", () => {
       text: "❌ Sub-session prompt exploded",
       streaming: false,
     });
-    expect(overlay.statusText.text).toContain("Request failed. Thread preserved for retry or follow-up.");
+    expect(overlay.statusText.text).toContain("Request failed: Sub-session prompt exploded. Thread preserved for retry or follow-up.");
   });
 
   it("updates assistant transcript text incrementally while the BTW response streams", async () => {
@@ -1994,7 +2037,7 @@ describe("btw runtime behavior", () => {
     expect(record.session.abort).not.toHaveBeenCalled();
     expect(record.getListenerCount()).toBe(1);
     expect(overlayHandle?.isHidden()).toBe(false);
-    expect(overlay.statusText.text).toContain("Ready. Enter submits; Escape dismisses without clearing.");
+    expect(overlay.statusText.text).toContain("No BTW thread to inject.");
     expect(transcriptText(overlay)).toContain("No BTW thread yet. Ask a side question to start one.");
     expect(harness.notifications.at(-1)).toEqual({
       message: "No BTW thread to inject.",
@@ -2108,7 +2151,7 @@ describe("btw runtime behavior", () => {
 
     const overlay = harness.latestOverlayComponent();
     overlay.refresh();
-    expect(overlay.statusText.text).toContain("Summarize failed. Thread preserved for retry or injection.");
+    expect(overlay.statusText.text).toContain("Summarize failed: Summary model exploded. Thread preserved for retry or injection.");
     expect(transcriptText(overlay)).toContain("You  first question");
     expect(transcriptText(overlay)).toContain("First answer");
     expect(harness.notifications.at(-1)).toEqual({
@@ -2258,7 +2301,7 @@ describe("btw runtime behavior", () => {
     expect(getCustomEntries(harness.entries, "btw-thread-entry")).toHaveLength(1);
     expect(getCustomEntries(harness.entries, "btw-thread-reset")).toHaveLength(0);
     expect(harness.sentUserMessages).toHaveLength(0);
-    expect(overlay.statusText.text).toContain("Request failed. Thread preserved for retry or follow-up.");
+    expect(overlay.statusText.text).toContain("Request failed: Slash dispatch exploded. Thread preserved for retry or follow-up.");
     expect(transcriptText(overlay)).toContain("You  first question");
     expect(transcriptText(overlay)).toContain("First answer");
     expect(transcriptText(overlay)).toContain("You  /plan fail loudly");

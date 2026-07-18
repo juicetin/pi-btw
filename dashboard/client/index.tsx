@@ -11,6 +11,7 @@ import {
   BTW_DASHBOARD_ACTION_EVENT,
   BTW_DASHBOARD_HISTORY_EVENT,
   BTW_DASHBOARD_STATE_EVENT,
+  formatBtwDashboardCommand,
   isBtwDashboardHistoryChunk,
   isBtwDashboardState,
   mergeBtwDashboardExchanges,
@@ -106,6 +107,90 @@ function ToolCards({ transcript }: { transcript: BtwDashboardTranscriptEntry[] }
   );
 }
 
+const THINKING_LEVELS = ["clear", "off", "minimal", "low", "medium", "high", "xhigh"] as const;
+
+export function createBtwDashboardRequestId(): string {
+  return globalThis.crypto.randomUUID();
+}
+
+function BtwControls({
+  disabled,
+  hasThread,
+  modelOverride,
+  thinkingOverride,
+  dispatch,
+}: {
+  disabled: boolean;
+  hasThread: boolean;
+  modelOverride: string | null;
+  thinkingOverride: string | null;
+  dispatch(command: string, args?: string): void;
+}) {
+  const [confirmClear, setConfirmClear] = useState(false);
+  const [model, setModel] = useState(modelOverride ?? "");
+  const confirmButton = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => setModel(modelOverride ?? ""), [modelOverride]);
+  useEffect(() => {
+    if (confirmClear) confirmButton.current?.focus();
+  }, [confirmClear]);
+
+  function applyModel(event: FormEvent): void {
+    event.preventDefault();
+    if (model.trim()) dispatch("btw:model", model);
+  }
+
+  function clearThread(): void {
+    dispatch("btw:clear");
+    setConfirmClear(false);
+  }
+
+  return (
+    <details style={controlsStyle}>
+      <summary style={{ cursor: "pointer", fontSize: 12 }}>Thread controls</summary>
+      <div style={controlGridStyle}>
+        <button type="button" disabled={disabled} onClick={() => dispatch("btw:new")} style={buttonStyle}>New thread</button>
+        <button type="button" disabled={disabled} onClick={() => dispatch("btw:tangent")} style={buttonStyle}>Use tangent mode</button>
+        <button type="button" disabled={disabled || !hasThread} onClick={() => dispatch("btw:inject")} style={buttonStyle}>Inject thread</button>
+        <button type="button" disabled={disabled || !hasThread} onClick={() => dispatch("btw:summarize")} style={buttonStyle}>Summarize and inject</button>
+      </div>
+      {confirmClear ? (
+        <div style={confirmRowStyle} aria-live="polite">
+          <span style={subtleStyle}>Clear the full BTW thread?</span>
+          <button ref={confirmButton} type="button" disabled={disabled} onClick={clearThread} style={dangerButtonStyle}>Confirm clear</button>
+          <button type="button" onClick={() => setConfirmClear(false)} style={buttonStyle}>Cancel clear</button>
+        </div>
+      ) : (
+        <button type="button" disabled={disabled || !hasThread} onClick={() => setConfirmClear(true)} style={dangerButtonStyle}>Clear thread</button>
+      )}
+      <form onSubmit={applyModel} style={controlFormStyle}>
+        <input
+          aria-label="BTW model override"
+          value={model}
+          onChange={(event) => setModel(event.target.value)}
+          placeholder="provider model api"
+          disabled={disabled}
+          style={inputStyle}
+        />
+        <button type="submit" disabled={disabled || !model.trim()} style={buttonStyle}>Apply model override</button>
+        <button type="button" disabled={disabled} onClick={() => dispatch("btw:model", "clear")} style={buttonStyle}>Use main model</button>
+      </form>
+      <label style={controlFormStyle}>
+        <span style={subtleStyle}>Thinking</span>
+        <select
+          aria-label="BTW thinking override"
+          value={thinkingOverride ?? "clear"}
+          disabled={disabled}
+          onChange={(event) => dispatch("btw:thinking", event.target.value)}
+          style={inputStyle}
+        >
+          {THINKING_LEVELS.map((level) => <option key={level} value={level}>{level === "clear" ? "Use main setting" : level}</option>)}
+        </select>
+      </label>
+    </details>
+  );
+}
+
 function BtwDrawer({
   sessionId,
   state,
@@ -121,6 +206,7 @@ function BtwDrawer({
 }) {
   const send = usePluginSend();
   const [draft, setDraft] = useState("");
+  const [saveExchange, setSaveExchange] = useState(false);
   const [submissionError, setSubmissionError] = useState<string | null>(null);
   const busy = state?.busy ?? false;
   const liveTranscript = selectLatestBtwTurn(state?.transcript ?? []);
@@ -128,6 +214,15 @@ function BtwDrawer({
   const liveTurnEnded = liveTranscript.some((entry) => entry.type === "turn-boundary" && entry.phase === "end");
   const showLiveTranscript = busy && liveTurnStarted && !liveTurnEnded;
   const liveAnswer = liveTranscript.findLast((entry) => entry.type === "assistant-text");
+
+  function dispatchCommand(command: string, args = ""): void {
+    if (busy || !connected) return;
+    send({
+      type: "send_prompt",
+      sessionId,
+      text: formatBtwDashboardCommand(command, args, createBtwDashboardRequestId()),
+    });
+  }
 
   function submit(event: FormEvent): void {
     event.preventDefault();
@@ -137,7 +232,8 @@ function BtwDrawer({
       setSubmissionError("BTW prompts must be a non-empty single line.");
       return;
     }
-    send({ type: "send_prompt", sessionId, text: prompt });
+    const command = state?.mode === "tangent" ? "btw:tangent" : "btw";
+    dispatchCommand(command, `${saveExchange ? "--save " : ""}${draft.trim()}`);
     setSubmissionError(null);
     setDraft("");
   }
@@ -191,6 +287,13 @@ function BtwDrawer({
           {!connected ? "Dashboard connection unavailable" : state?.statusText ?? (busy ? "Running…" : "Ready")}
         </div>
         {submissionError ? <div role="alert" style={errorStyle}>{submissionError}</div> : null}
+        <BtwControls
+          disabled={busy || !connected}
+          hasThread={(state?.exchanges.length ?? 0) > 0}
+          modelOverride={state?.modelOverride ?? null}
+          thinkingOverride={state?.thinkingOverride ?? null}
+          dispatch={dispatchCommand}
+        />
         <form onSubmit={submit}>
           <textarea
             aria-label="Ask BTW"
@@ -201,8 +304,17 @@ function BtwDrawer({
             style={textareaStyle}
           />
           <div style={actionRowStyle}>
+            <label style={saveLabelStyle}>
+              <input
+                type="checkbox"
+                checked={saveExchange}
+                onChange={(event) => setSaveExchange(event.target.checked)}
+                disabled={busy || !connected}
+              />
+              Save exchange
+            </label>
             <button type="submit" disabled={busy || !connected || !draft.trim()} style={buttonStyle}>Send</button>
-            <button type="button" disabled={!busy || !connected} onClick={abort} style={dangerButtonStyle}>Abort</button>
+            <button type="button" disabled={!state?.abortable || !connected} onClick={abort} style={dangerButtonStyle}>Abort</button>
           </div>
         </form>
       </footer>
@@ -317,3 +429,9 @@ const toolCardStyle: React.CSSProperties = { marginBottom: 7, padding: 8, border
 const preStyle: React.CSSProperties = { whiteSpace: "pre-wrap", overflowWrap: "anywhere", fontSize: 11, margin: "7px 0 0" };
 const errorStyle: React.CSSProperties = { padding: 8, border: "1px solid #ef4444", color: "#fca5a5", borderRadius: 6 };
 const emptyStyle: React.CSSProperties = { color: "var(--text-muted, #9ca3af)", padding: "18px 0" };
+const controlsStyle: React.CSSProperties = { margin: "8px 0", padding: 8, border: "1px solid #374151", borderRadius: 6 };
+const controlGridStyle: React.CSSProperties = { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, margin: "8px 0" };
+const confirmRowStyle: React.CSSProperties = { display: "flex", alignItems: "center", flexWrap: "wrap", gap: 6, margin: "8px 0" };
+const controlFormStyle: React.CSSProperties = { display: "flex", alignItems: "center", gap: 6, marginTop: 8 };
+const inputStyle: React.CSSProperties = { minWidth: 0, flex: 1, padding: 6, color: "inherit", background: "var(--bg-secondary, #1f2937)", border: "1px solid var(--border-color, #4b5563)", borderRadius: 5 };
+const saveLabelStyle: React.CSSProperties = { display: "inline-flex", alignItems: "center", gap: 5, marginRight: "auto", fontSize: 12 };

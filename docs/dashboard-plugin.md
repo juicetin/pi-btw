@@ -40,19 +40,23 @@ Live events and the server snapshot are two explicit sources. The client selects
 
 ## Actions
 
-The composer sends `/btw <question>` through the dashboard's standard `send_prompt` path. This gives the extension a real command context and preserves the TUI command implementation.
+The panel sends `/btw`, `/btw:new`, `/btw:clear`, `/btw:tangent`, `/btw:model`, `/btw:thinking`, `/btw:inject`, and `/btw:summarize` through the dashboard's standard `send_prompt` path. This gives every action a real command context and keeps the extension's slash commands as the only implementation. The composer has a Save exchange toggle that adds `--save`, matching `/btw --save`.
+
+Each panel action includes a UUID in a private `--btw-dashboard-request` suffix. The extension removes that suffix before parsing command arguments, persists the UUID in the Pi session, and ignores later copies. Request IDs are restored from all session entries, including sibling branches. This gives each dashboard session at-most-once action handling across WebSocket reconnects and Pi process restarts. The client does not retry failed actions.
+
+Clear requires a second click on Confirm clear. New thread, tangent mode, inject, summarize, model override, and thinking override use native panel controls. Model input retains the slash command's `provider model api` format. The model and thinking reset controls restore the main session settings.
 
 Snapshot and abort use the dashboard's standard `ui_management` transport with event `btw:dashboard-action`. The canonical extension accepts only `snapshot` and `abort` actions. It does not expose a generic command or event executor.
 
-A second submit while BTW is running is rejected by both the disabled client control and the extension-side busy check, including attempts to switch between contextual and tangent modes. Abort targets only the BTW sub-session. Hiding the drawer does not abort; state and execution continue in the mounted contribution.
+A second submit while BTW is running is rejected by both the disabled client control and the extension-side busy check, including attempts to switch between contextual and tangent modes. Inject and summarize use the same exclusive busy guard, so two handoffs cannot run at once. The snapshot distinguishes busy work from abortable sub-session streaming. Abort targets only the BTW sub-session and stays disabled during a non-abortable handoff. Hiding the drawer does not abort; state and execution continue in the mounted contribution. Request, inject, and summarize failures include the original error text in dashboard state. The extension preserves the thread for another explicit action.
 
-Send and Abort are disabled while the dashboard WebSocket is disconnected. The draft remains in the panel instead of being cleared into a dropped transport message. Selecting another dashboard session remounts the session-specific contribution, clearing the prior snapshot, errors, open state, and draft.
+All mutating controls are disabled while the dashboard WebSocket is disconnected. The draft remains in the panel instead of being cleared into a dropped transport message. Selecting another dashboard session remounts the session-specific contribution, clearing the prior snapshot, errors, open state, and draft.
 
 Typing `/btw`, `/btw:tangent`, or `/btw:new` in the main dashboard composer publishes a fresh panel-open request. Connected clients auto-open only when that request is at most five seconds old, which avoids reopening stale drawers after a later page refresh.
 
 ## Display model
 
-Persisted exchanges show user question, assistant answer, and model identity. Live state can also show the streaming answer and expandable tool call/result cards. Tool cards are not reconstructed after completion; the durable view remains the persisted question and answer.
+Persisted exchanges show user question, assistant answer, and model identity. Snapshot state also carries the active BTW-only model and thinking overrides, so closing and reopening the drawer does not display main-session defaults while an override remains active. Live state can show the streaming answer and expandable tool call/result cards. Tool cards are not reconstructed after completion; the durable view remains the persisted question and answer.
 
 The panel blocks concurrent submit, exposes explicit Abort, reports snapshot and transport failures, and shows idle, running, or error status in the button and composer footer.
 
@@ -65,4 +69,4 @@ npx tsc --noEmit
 npm pack --dry-run
 ```
 
-The test suite covers the protocol, port coalescing, bridge action routing, server snapshot hydration, official dashboard manifest validation, React panel behavior, headless BTW streaming, concurrent-submit rejection, and sub-session abort.
+The test suite covers the protocol, request-id extraction, duplicate suppression after reconnect and restart, lifecycle controls, clear confirmation, save parity, port coalescing, bridge action routing, server snapshot hydration, official dashboard manifest validation, React panel behavior, headless BTW streaming, concurrent-submit rejection, and sub-session abort.

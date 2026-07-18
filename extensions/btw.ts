@@ -26,6 +26,7 @@ import {
   boundBtwDashboardExchange,
   boundBtwDashboardText,
   boundBtwDashboardTranscriptEntry,
+  extractBtwDashboardRequest,
   isBtwDashboardAction,
   type BtwDashboardExchange,
   type BtwDashboardHistoryChunk,
@@ -53,6 +54,7 @@ const BTW_ENTRY_TYPE = "btw-thread-entry";
 const BTW_RESET_TYPE = "btw-thread-reset";
 const BTW_MODEL_OVERRIDE_TYPE = "btw-model-override";
 const BTW_THINKING_OVERRIDE_TYPE = "btw-thinking-override";
+const BTW_DASHBOARD_REQUEST_TYPE = "btw-dashboard-request";
 const BTW_FOCUS_SHORTCUTS = [Key.alt("/"), Key.ctrlAlt("w")] as const;
 
 function matchesBtwFocusShortcut(data: string): boolean {
@@ -114,6 +116,11 @@ type BtwModelOverrideDetails =
 type BtwThinkingOverrideDetails =
   | { timestamp: number; action: "set"; thinkingLevel: SessionThinkingLevel }
   | { timestamp: number; action: "clear" };
+
+type BtwDashboardRequestDetails = {
+  timestamp: number;
+  requestId: string;
+};
 
 type ResolvedBtwModel = {
   model: SessionModel | null;
@@ -1346,8 +1353,10 @@ export default function (pi: ExtensionAPI) {
   let lastUiContext: ExtensionContext | ExtensionCommandContext | null = null;
   let activeBtwSession: BtwSessionRuntime | null = null;
   let btwRequestInFlight = false;
+  let btwActionInFlight = false;
   let dashboardHistoryRequest = 0;
   let dashboardThreadId = "pending";
+  const processedDashboardRequests = new Set<string>();
 
   function getAllDashboardExchanges(): BtwDashboardExchange[] {
     return pendingThread.map((entry) => boundBtwDashboardExchange({
@@ -1361,7 +1370,8 @@ export default function (pi: ExtensionAPI) {
   }
 
   function getDashboardSnapshot(): BtwDashboardSnapshot {
-    const busy = btwRequestInFlight || (activeBtwSession?.session.isStreaming ?? false);
+    const abortable = activeBtwSession?.session.isStreaming ?? false;
+    const busy = btwRequestInFlight || btwActionInFlight || abortable;
     const statusLower = overlayStatus?.toLowerCase() ?? "";
     const phase = busy
       ? "running"
@@ -1373,6 +1383,9 @@ export default function (pi: ExtensionAPI) {
       mode: pendingMode,
       phase,
       busy,
+      abortable,
+      modelOverride: btwModelOverride ? `${btwModelOverride.provider} ${btwModelOverride.id} ${btwModelOverride.api}` : null,
+      thinkingOverride: btwThinkingOverride,
       statusText: overlayStatus === null ? null : boundBtwDashboardText(overlayStatus),
       exchanges: getAllDashboardExchanges().slice(-BTW_DASHBOARD_ARRAY_LIMIT),
       transcript: transcriptState.entries
@@ -1817,7 +1830,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   function rejectBusyBtwRequest(ctx: ExtensionCommandContext): boolean {
-    if (!btwRequestInFlight && !activeBtwSession?.session.isStreaming) return false;
+    if (!btwRequestInFlight && !btwActionInFlight && !activeBtwSession?.session.isStreaming) return false;
     const message = "A BTW request is already running. Abort it or wait for it to finish.";
     setOverlayStatus(message, ctx);
     notify(ctx, message, "warning");
@@ -1825,8 +1838,33 @@ export default function (pi: ExtensionAPI) {
     return true;
   }
 
+  async function runExclusiveBtwAction(
+    ctx: ExtensionCommandContext,
+    action: () => Promise<void>,
+  ): Promise<void> {
+    if (rejectBusyBtwRequest(ctx)) return;
+    btwActionInFlight = true;
+    publishBtwDashboardState({ immediate: true });
+    try {
+      await action();
+    } finally {
+      btwActionInFlight = false;
+      syncUi(ctx);
+    }
+  }
+
   async function dispatchBtwCommand(name: string, args: string, ctx: ExtensionCommandContext): Promise<boolean> {
-    const trimmedArgs = args.trim();
+    const dashboardRequest = extractBtwDashboardRequest(args);
+    if (dashboardRequest.requestId) {
+      if (processedDashboardRequests.has(dashboardRequest.requestId)) return true;
+      processedDashboardRequests.add(dashboardRequest.requestId);
+      const details: BtwDashboardRequestDetails = {
+        timestamp: Date.now(),
+        requestId: dashboardRequest.requestId,
+      };
+      pi.appendEntry(BTW_DASHBOARD_REQUEST_TYPE, details);
+    }
+    const trimmedArgs = dashboardRequest.args.trim();
     if (name === "btw" || name === "btw:tangent" || name === "btw:new") {
       publishBtwDashboardState({ openPanel: true, immediate: true });
     }
@@ -1927,59 +1965,61 @@ export default function (pi: ExtensionAPI) {
     }
 
     if (name === "btw:inject") {
-      if (pendingThread.length === 0) {
-        notify(ctx, "No BTW thread to inject.", "warning");
-        return true;
-      }
+      await runExclusiveBtwAction(ctx, async () => {
+        if (pendingThread.length === 0) {
+          setOverlayStatus("No BTW thread to inject.", ctx);
+          notify(ctx, "No BTW thread to inject.", "warning");
+          return;
+        }
 
-      setOverlayStatus("⏳ injecting into the main session...", ctx);
-      await ensureOverlay(ctx);
-
-      try {
-        const { thread } = await getBtwHandoffThread(ctx);
-        const instructions = trimmedArgs;
-        const content = instructions
-          ? `Here is a side conversation I had. ${instructions}\n\n${formatThread(thread)}`
-          : `Here is a side conversation I had for additional context:\n\n${formatThread(thread)}`;
-
-        sendThreadToMain(ctx, content);
-        const count = thread.length;
-        await resetThread(ctx);
-        dismissOverlay();
-        notify(ctx, `Injected BTW thread (${count} exchange${count === 1 ? "" : "s"}).`, "info");
-      } catch (error) {
-        setOverlayStatus("Inject failed. Thread preserved for retry or summarize.", ctx);
-        notify(ctx, error instanceof Error ? error.message : String(error), "error");
-      }
+        setOverlayStatus("⏳ injecting into the main session...", ctx);
+        await ensureOverlay(ctx);
+        try {
+          const { thread } = await getBtwHandoffThread(ctx);
+          const content = trimmedArgs
+            ? `Here is a side conversation I had. ${trimmedArgs}\n\n${formatThread(thread)}`
+            : `Here is a side conversation I had for additional context:\n\n${formatThread(thread)}`;
+          sendThreadToMain(ctx, content);
+          const count = thread.length;
+          await resetThread(ctx);
+          dismissOverlay();
+          notify(ctx, `Injected BTW thread (${count} exchange${count === 1 ? "" : "s"}).`, "info");
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          setOverlayStatus(`Inject failed: ${message}. Thread preserved for retry or summarize.`, ctx);
+          notify(ctx, message, "error");
+        }
+      });
       return true;
     }
 
     if (name === "btw:summarize") {
-      if (pendingThread.length === 0) {
-        notify(ctx, "No BTW thread to summarize.", "warning");
-        return true;
-      }
+      await runExclusiveBtwAction(ctx, async () => {
+        if (pendingThread.length === 0) {
+          setOverlayStatus("No BTW thread to summarize.", ctx);
+          notify(ctx, "No BTW thread to summarize.", "warning");
+          return;
+        }
 
-      setOverlayStatus("⏳ summarizing...", ctx);
-      await ensureOverlay(ctx);
-
-      try {
-        const { thread } = await getBtwHandoffThread(ctx);
-        const summary = await summarizeThread(ctx, thread);
-        const instructions = trimmedArgs;
-        const content = instructions
-          ? `Here is a summary of a side conversation I had. ${instructions}\n\n${summary}`
-          : `Here is a summary of a side conversation I had:\n\n${summary}`;
-
-        sendThreadToMain(ctx, content);
-        const count = thread.length;
-        await resetThread(ctx);
-        dismissOverlay();
-        notify(ctx, `Injected BTW summary (${count} exchange${count === 1 ? "" : "s"}).`, "info");
-      } catch (error) {
-        setOverlayStatus("Summarize failed. Thread preserved for retry or injection.", ctx);
-        notify(ctx, error instanceof Error ? error.message : String(error), "error");
-      }
+        setOverlayStatus("⏳ summarizing...", ctx);
+        await ensureOverlay(ctx);
+        try {
+          const { thread } = await getBtwHandoffThread(ctx);
+          const summary = await summarizeThread(ctx, thread);
+          const content = trimmedArgs
+            ? `Here is a summary of a side conversation I had. ${trimmedArgs}\n\n${summary}`
+            : `Here is a summary of a side conversation I had:\n\n${summary}`;
+          sendThreadToMain(ctx, content);
+          const count = thread.length;
+          await resetThread(ctx);
+          dismissOverlay();
+          notify(ctx, `Injected BTW summary (${count} exchange${count === 1 ? "" : "s"}).`, "info");
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          setOverlayStatus(`Summarize failed: ${message}. Thread preserved for retry or injection.`, ctx);
+          notify(ctx, message, "error");
+        }
+      });
       return true;
     }
 
@@ -2051,10 +2091,17 @@ export default function (pi: ExtensionAPI) {
     pendingMode = "contextual";
     btwModelOverride = null;
     btwThinkingOverride = null;
+    processedDashboardRequests.clear();
     transcriptState = createEmptyTranscriptState();
     overlayDraft = "";
     lastUiContext = ctx;
     overlayStatus = null;
+
+    for (const entry of ctx.sessionManager.getEntries()) {
+      if (!isCustomEntry(entry, BTW_DASHBOARD_REQUEST_TYPE)) continue;
+      const details = (entry as unknown as { data?: BtwDashboardRequestDetails }).data;
+      if (details?.requestId) processedDashboardRequests.add(details.requestId);
+    }
 
     const branch = ctx.sessionManager.getBranch();
     let lastResetIndex = -1;
@@ -2230,7 +2277,7 @@ export default function (pi: ExtensionAPI) {
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       setTranscriptFailure(transcriptState, errorMessage);
-      setOverlayStatus("Request failed. Thread preserved for retry or follow-up.", ctx);
+      setOverlayStatus(`Request failed: ${errorMessage}. Thread preserved for retry or follow-up.`, ctx);
       notify(ctx, errorMessage, "error");
       await disposeBtwSession();
     }
