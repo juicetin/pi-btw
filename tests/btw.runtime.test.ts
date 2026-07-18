@@ -271,6 +271,10 @@ function buildMockSystemPrompt(options: any): string {
 
 function createMockAgentSession(options: any) {
   const listeners = new Set<(event: any) => void>();
+  const activeToolNames = [
+    ...(options.tools ?? []),
+    ...(options.customTools ?? []).map((tool: { name: string }) => tool.name),
+  ];
   let seedMessages: any[] = [];
   let stateMessages: any[] = [];
   let isStreaming = false;
@@ -309,7 +313,7 @@ function createMockAgentSession(options: any) {
         return stateMessages;
       },
       model: options.model,
-      tools: (options.tools ?? []).map((name: string) => ({ name })),
+      tools: activeToolNames.map((name: string) => ({ name })),
     },
     get model() {
       return options.model;
@@ -411,7 +415,7 @@ function createMockAgentSession(options: any) {
       listeners.clear();
     }),
     bindExtensions: vi.fn(),
-    getActiveToolNames: vi.fn(() => (options.tools ?? []) as string[]),
+    getActiveToolNames: vi.fn(() => activeToolNames),
   };
 
   record.session = session;
@@ -578,6 +582,7 @@ function createHarness(
 
   const baseCtx = {
     hasUI: true,
+    cwd: process.cwd(),
     ui: ui as any,
     sessionManager: sessionManager as any,
     modelRegistry: {
@@ -714,15 +719,18 @@ describe("btw runtime behavior", () => {
     const options = createAgentSessionMock.mock.calls[0][0];
     expect(options.model).toBe(harness.baseCtx.model);
     expect(options.modelRegistry).toBe(harness.baseCtx.modelRegistry);
-    expect(options.tools).toEqual(["read", "bash", "edit", "write"]);
+    expect(options.cwd).toBe(harness.baseCtx.cwd);
+    expect(options.noTools).toBe("builtin");
+    expect(options.customTools.map((tool: { name: string }) => tool.name)).toEqual(["read", "bash"]);
     expect(options.resourceLoader.getAppendSystemPrompt()[0]).toContain(
       "You are having an aside conversation with the user, separate from their main working session.",
     );
+    expect(options.resourceLoader.getAppendSystemPrompt()[0]).toContain("file tools run in a read-only sandbox");
 
     const subSession = subSessionRecords[0]?.session;
     expect(subSession).toBeDefined();
     expect(subSession.bindExtensions).not.toHaveBeenCalled();
-    expect(subSession.getActiveToolNames()).toEqual(["read", "bash", "edit", "write"]);
+    expect(subSession.getActiveToolNames()).toEqual(["read", "bash"]);
     expect(subSession.prompt).toHaveBeenCalledWith("first question", { source: "extension" });
   });
 
